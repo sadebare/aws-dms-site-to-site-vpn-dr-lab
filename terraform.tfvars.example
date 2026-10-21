@@ -1,0 +1,21 @@
+project         = "dr-db-repl"
+environment     = "lab"
+onprem_region   = "us-east-1"
+cloud_region    = "us-west-2"
+onprem_vpc_cidr = "10.10.0.0/16"
+cloud_vpc_cidr  = "10.20.0.0/16"
+az_count        = 2
+enable_test_vms = true
+
+onprem_enable_nat_gateway = true
+cloud_enable_nat_gateway  = false
+
+postgres_version         = "16"
+db_name                  = "appdb"
+db_username              = "dbadmin"
+source_db_instance_class = "db.t4g.micro"
+target_db_instance_type  = "t3.micro"
+
+dms_create_iam_roles = true
+dms_instance_class   = "dms.t3.small"
+dms_start_task       = false

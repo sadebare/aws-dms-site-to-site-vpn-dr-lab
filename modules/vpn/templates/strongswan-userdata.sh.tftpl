@@ -1,0 +1,115 @@
+#!/bin/bash
+# strongSwan route-based (VTI) site-to-site VPN to an AWS Virtual Private Gateway.
+# Rendered by Terraform templatefile(): double-dollar braces are literal bash
+# expansions, single-dollar braces are Terraform values.
+set -euxo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update -y
+apt-get install -y strongswan iptables
+
+# --- Kernel: act as a router -----------------------------------------------
+cat >/etc/sysctl.d/99-vpn.conf <<'EOF'
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.rp_filter = 2
+net.ipv4.conf.default.rp_filter = 2
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.all.accept_redirects = 0
+EOF
+sysctl --system
+
+# --- charon: routes are managed by the updown script, not by strongSwan ------
+cat >/etc/strongswan.d/charon-vti.conf <<'EOF'
+charon {
+    install_routes = no
+}
+EOF
+
+# --- IPsec connections ---------------------------------------------------------
+cat >/etc/ipsec.conf <<'EOF'
+config setup
+    uniqueids = no
+
+conn %default
+    type = tunnel
+    authby = psk
+    keyexchange = ikev2
+    ike = aes256-sha256-modp2048!
+    esp = aes256-sha256-modp2048!
+    ikelifetime = 8h
+    lifetime = 1h
+    margintime = 9m
+    keyingtries = %forever
+    dpddelay = 10s
+    dpdtimeout = 30s
+    dpdaction = restart
+    auto = start
+    left = %defaultroute
+    leftid = ${public_ip}
+    leftsubnet = 0.0.0.0/0
+    rightsubnet = 0.0.0.0/0
+    leftupdown = /etc/ipsec-vti.sh
+
+conn tunnel1
+    right = ${tunnel1_address}
+    mark = 100
+
+conn tunnel2
+    right = ${tunnel2_address}
+    mark = 200
+EOF
+
+cat >/etc/ipsec.secrets <<'EOF'
+${public_ip} ${tunnel1_address} : PSK "${tunnel1_psk}"
+${public_ip} ${tunnel2_address} : PSK "${tunnel2_psk}"
+EOF
+chmod 600 /etc/ipsec.secrets
+
+# --- VTI updown script: creates vti1/vti2 and routes the target VPC over them --
+cat >/etc/ipsec-vti.sh <<'EOF'
+#!/bin/bash
+IP=$(command -v ip)
+IPTABLES=$(command -v iptables)
+
+PLUTO_MARK_OUT_ARR=($${PLUTO_MARK_OUT//// })
+PLUTO_MARK_IN_ARR=($${PLUTO_MARK_IN//// })
+
+case "$PLUTO_CONNECTION" in
+  tunnel1)
+    VTI_INTERFACE=vti1
+    VTI_LOCALADDR=${tunnel1_cgw_inside}/30
+    VTI_REMOTEADDR=${tunnel1_vgw_inside}/30
+    METRIC=100
+    ;;
+  tunnel2)
+    VTI_INTERFACE=vti2
+    VTI_LOCALADDR=${tunnel2_cgw_inside}/30
+    VTI_REMOTEADDR=${tunnel2_vgw_inside}/30
+    METRIC=200
+    ;;
+esac
+
+case "$PLUTO_VERB" in
+  up-client)
+    $IP link add $VTI_INTERFACE type vti local $PLUTO_ME remote $PLUTO_PEER \
+      okey $${PLUTO_MARK_OUT_ARR[0]} ikey $${PLUTO_MARK_IN_ARR[0]}
+    sysctl -w net.ipv4.conf.$VTI_INTERFACE.disable_policy=1
+    sysctl -w net.ipv4.conf.$VTI_INTERFACE.rp_filter=2
+    $IP addr add $VTI_LOCALADDR remote $VTI_REMOTEADDR dev $VTI_INTERFACE
+    $IP link set $VTI_INTERFACE up mtu 1419
+    $IPTABLES -t mangle -I FORWARD -o $VTI_INTERFACE -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+    $IPTABLES -t mangle -I INPUT -p esp -s $PLUTO_PEER -d $PLUTO_ME -j MARK --set-xmark $PLUTO_MARK_IN
+    # Tunnel 1 preferred (lower metric); tunnel 2 takes over if tunnel 1 drops
+    $IP route replace ${cloud_vpc_cidr} dev $VTI_INTERFACE metric $METRIC
+    ;;
+  down-client)
+    $IP link del $VTI_INTERFACE || true
+    $IPTABLES -t mangle -D FORWARD -o $VTI_INTERFACE -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+    $IPTABLES -t mangle -D INPUT -p esp -s $PLUTO_PEER -d $PLUTO_ME -j MARK --set-xmark $PLUTO_MARK_IN || true
+    ;;
+esac
+EOF
+chmod 755 /etc/ipsec-vti.sh
+
+systemctl enable strongswan-starter
+systemctl restart strongswan-starter

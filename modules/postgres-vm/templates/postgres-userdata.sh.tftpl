@@ -1,0 +1,41 @@
+#!/bin/bash
+# PostgreSQL ${postgres_version} on Amazon Linux 2023, rendered by Terraform templatefile().
+set -euxo pipefail
+
+PGDATA=/var/lib/pgsql/data
+
+# The NAT route may not be ready the moment the instance boots, so retry
+until dnf install -y postgresql${postgres_version}-server; do
+  echo "dnf install failed, retrying in 15s"
+  sleep 15
+done
+
+postgresql-setup --initdb
+
+# --- postgresql.conf (appended settings override the defaults above them) ------
+cat >>$PGDATA/postgresql.conf <<'EOF'
+
+# ---- added by Terraform ----
+listen_addresses = '*'
+password_encryption = scram-sha-256
+EOF
+
+# --- pg_hba.conf: password auth from the local VPC and the peer site -----------
+cat >>$PGDATA/pg_hba.conf <<'EOF'
+
+# ---- added by Terraform ----
+%{ for cidr in allowed_cidrs ~}
+host    all    all    ${cidr}    scram-sha-256
+%{ endfor ~}
+EOF
+
+systemctl enable --now postgresql
+
+# --- user and (empty) database for DMS to load into ----------------------------
+# SUPERUSER lets DMS set session_replication_role=replica during the load
+sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+CREATE ROLE ${db_user} WITH LOGIN SUPERUSER PASSWORD '${db_password}';
+CREATE DATABASE ${db_name} OWNER ${db_user};
+SQL
+
+echo "PostgreSQL bootstrap complete"

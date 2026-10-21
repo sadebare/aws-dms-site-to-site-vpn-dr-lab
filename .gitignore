@@ -1,0 +1,22 @@
+# Terraform state: contains passwords, VPN pre-shared keys and account details. Never commit.
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+
+# Provider binaries and module cache (recreated by terraform init)
+.terraform/
+
+# Your own settings; terraform.tfvars.example is the committed template
+terraform.tfvars
+*.auto.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
